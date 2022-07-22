@@ -22,11 +22,10 @@ class NativeSimulatorAdapter(DeviceAbstract):
         super().__init__(twister_config, hardware_map, **kwargs)
         self._process: subprocess.Popen | None = None
         self._process_ended_with_timeout: bool = False
-        self.queue: Queue = Queue()
+        self.queue: Queue | None = None
 
-    @staticmethod
-    def get_command(build_dir: Path | str) -> str:
-        return str((Path(build_dir) / 'zephyr' / 'zephyr.exe').resolve())
+    def get_command(self, build_dir: Path | str) -> list:
+        return [str((Path(build_dir) / 'zephyr' / 'zephyr.exe').resolve())]
 
     def connect(self, timeout: float = 60):
         pass
@@ -41,12 +40,15 @@ class NativeSimulatorAdapter(DeviceAbstract):
 
     def flash(self, build_dir: str | Path, timeout: float = 60.0) -> None:
         """Run simulation."""
-        command: str = self.get_command(build_dir)
-        logger.info('Flashing device')
-        logger.info('Flashing command: %s', command)
+        self._prepare_queue()
+
+        command: list = self.get_command(build_dir)
+        logger.info('Running device')
+        logger.info('Running command: %s', ' '.join(command))
         try:
             self._process = subprocess.Popen(
                 command,
+                cwd=build_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=self.env,
@@ -71,6 +73,9 @@ class NativeSimulatorAdapter(DeviceAbstract):
                 if stderr := self._process.stderr.read():
                     logger.error(stderr.decode())
                 raise TwisterFlashException(f'Could not run simulator with PID {self._process.pid}')
+
+    def _prepare_queue(self):
+        self.queue = Queue()
 
     def _collect_process_output(self, process: subprocess.Popen) -> threading.Thread:
         """Create Thread which saves a process output to a file."""
