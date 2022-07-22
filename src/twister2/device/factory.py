@@ -6,6 +6,7 @@ from typing import Type
 from twister2.device.device_abstract import DeviceAbstract
 from twister2.device.hardware_adapter import HardwareAdapter
 from twister2.device.native_simulator_adapter import NativeSimulatorAdapter
+from twister2.device.bsim_adapter import BsimAdapter
 from twister2.exceptions import TwisterRunException
 
 logger = logging.getLogger(__name__)
@@ -35,3 +36,4 @@ class DeviceFactory:
 
 DeviceFactory.register_device_class('native', NativeSimulatorAdapter)
 DeviceFactory.register_device_class('hardware', HardwareAdapter)
+DeviceFactory.register_device_class('bsim', BsimAdapter)

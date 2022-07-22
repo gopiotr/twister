@@ -4,6 +4,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,7 @@ class TwisterConfig:
     platforms: list[PlatformSpecification] = field(default_factory=list, repr=False)
     hardware_map_list: list[HardwareMap] = field(default_factory=list, repr=False)
     device_testing: bool = False
+    bsim_bin_path: str | Path = ''
 
     @classmethod
     def create(cls, config: pytest.Config) -> TwisterConfig:
@@ -53,6 +55,8 @@ class TwisterConfig:
         else:
             default_platforms = list(set(default_platforms))  # remove duplicates
 
+        bsim_bin_path: Path = Path(os.environ.get('BSIM_OUT_PATH')) / "bin"
+
         data: dict[str, Any] = dict(
             zephyr_base=zephyr_base,
             build_only=build_only,
@@ -62,6 +66,7 @@ class TwisterConfig:
             output_dir=output_dir,
             hardware_map_list=hardware_map_list,
             device_testing=device_testing,
+            bsim_bin_path=bsim_bin_path
         )
         return cls(**data)
 
