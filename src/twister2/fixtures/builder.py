@@ -23,6 +23,11 @@ def builder(request: pytest.FixtureRequest) -> BuilderAbstract:
     function.spec.build_dir = (Path(twister_config.output_dir) / function.spec.platform
                                / function.spec.rel_to_base_path / function.spec.original_name)
     function.spec.build_dir = function.spec.build_dir.resolve()
+
+    if function.spec.bsim_config:
+        logger.debug("bsim_config detected - skip building")
+        return builder
+
     builder.build(
         platform=function.spec.platform,
         build_dir=function.spec.build_dir,
