@@ -22,11 +22,17 @@ logger = logging.getLogger(__name__)
 
 def yaml_test_function_factory(spec: YamlTestSpecification, parent: Any) -> YamlTestFunction:
     """Generate test function."""
+
+    if spec.multi_device:
+        test_function = YamlMultiDeviceTestCase(spec)
+    else:
+        test_function = YamlTestCase(spec)
+
     function = YamlTestFunction.from_parent(
         name=spec.name,
         originalname=spec.original_name,
         parent=parent,
-        callobj=YamlTestCase(spec),  # callable object (test function)
+        callobj=test_function,  # callable object (test function)
     )
     function.add_marker(pytest.mark.platform(spec.platform))
     function.add_marker(pytest.mark.type(spec.type))
@@ -79,3 +85,25 @@ class YamlTestCase:
                 assert test.result == SubTestStatus.PASS, f'Subtest {test.testname} failed'
 
         assert log_parser.state == 'PASSED', 'Test failed due to: {}'.format('\n'.join(log_parser.messages))
+
+
+class YamlMultiDeviceTestCase:
+    """Callable class representing yaml test dedicated for multi device."""
+
+    def __init__(self, spec: YamlTestSpecification, description: str = ''):
+        """
+        :param spec: test specification
+        :param description: test description (docstring)
+        """
+        self.spec = spec
+        self.__doc__ = description
+
+    def __call__(
+        self,
+        request: pytest.FixtureRequest,
+        multi_dut: list[DeviceAbstract]
+    ):
+        """Method called by pytest when it runs test."""
+        for device in multi_dut:
+            for line in device.out:
+                logger.debug(line.strip())
