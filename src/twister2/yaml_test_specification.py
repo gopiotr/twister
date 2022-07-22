@@ -40,6 +40,8 @@ class YamlTestSpecification:
     harness_config: dict = field(default_factory=dict)
     toolchain_exclude: set[str] = field(default_factory=set)
     toolchain_allow: set[str] = field(default_factory=set)
+    multi_device: bool = False
+    bsim_config: dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.tags = string_to_set(self.tags)
