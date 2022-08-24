@@ -15,11 +15,11 @@ class HardwareMap:
     platform: str
     runner: str
     connected: bool
-    available: bool = False
+    available: bool = True
     notes: str = ''
     probe_id: str = ''
     serial: Optional[str] = None
-    baud: str = '115200'
+    baud: int = 115200
     pre_script: str = ''
     post_script: str = ''
     post_flash_script: str = ''

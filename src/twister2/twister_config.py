@@ -4,6 +4,9 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
+from filelock import FileLock, BaseFileLock
+import yaml
+import time
 
 import pytest
 
@@ -11,6 +14,7 @@ from twister2.device.hardware_map import HardwareMap
 from twister2.platform_specification import PlatformSpecification
 
 logger = logging.getLogger(__name__)
+logging.getLogger("filelock").setLevel(logging.ERROR)
 
 
 @dataclass
@@ -22,7 +26,8 @@ class TwisterConfig:
     build_only: bool = False
     default_platforms: list[str] = field(default_factory=list, repr=False)
     platforms: list[PlatformSpecification] = field(default_factory=list, repr=False)
-    hardware_map_list: list[HardwareMap] = field(default_factory=list, repr=False)
+    # hardware_map_list: list[HardwareMap] = field(default_factory=list, repr=False)
+    hardware_map_file: str | None = None
     device_testing: bool = False
 
     @classmethod
@@ -41,9 +46,8 @@ class TwisterConfig:
         hardware_map_file: str = config.getoption('--hardware-map')
         device_testing: bool = config.getoption('--device-testing')
 
-        hardware_map_list: list[HardwareMap] = []
         if hardware_map_file:
-            hardware_map_list = HardwareMap.read_from_file(filename=hardware_map_file)
+            cls.clean_hardware_map_availability(hardware_map_file)
 
         if not default_platforms:
             default_platforms = [
@@ -60,7 +64,8 @@ class TwisterConfig:
             default_platforms=default_platforms,
             board_root=board_root,
             output_dir=output_dir,
-            hardware_map_list=hardware_map_list,
+            # hardware_map_list=hardware_map_list,
+            hardware_map_file=hardware_map_file,
             device_testing=device_testing,
         )
         return cls(**data)
@@ -74,6 +79,28 @@ class TwisterConfig:
             output_dir=self.output_dir,
         )
 
+    def clean_hardware_map_availability(hardware_map_file: str) -> None:
+        """
+        Set available statuses of each platform as "True" in case of leaving there "False" value after previous Twister
+        call which was accidentally interrupted.
+        """
+        lock_timeout_duration: float = 600.0  # [s]
+        lock: BaseFileLock = FileLock(f"{hardware_map_file}.lock")
+
+        with lock.acquire(lock_timeout_duration):
+            with open(hardware_map_file, 'r', encoding='UTF-8') as file:
+                data = yaml.safe_load(file)
+            hardware_map_list = [HardwareMap(**hardware) for hardware in data]
+
+            for hardware in hardware_map_list:
+                if not hardware.available:
+                    logger.debug('Set available option value in hardware map to true')
+                    hardware.available = True
+
+            with open(hardware_map_file, 'w', encoding='UTF-8') as file:
+                hardware_map_list_as_dict = [hardware.asdict() for hardware in hardware_map_list]
+                yaml.dump(hardware_map_list_as_dict, file, Dumper=yaml.Dumper, default_flow_style=False)
+
     def get_hardware_map(self, platform: str) -> HardwareMap | None:
         """
         Return hardware map matching platform and being connected.
@@ -81,12 +108,59 @@ class TwisterConfig:
         :param platform: platform name
         :return: hardware map or None
         """
-        hardware_map_iter = (
-            hardware for hardware in self.hardware_map_list
-            if hardware.platform == platform
-            if hardware.connected is True
-        )
-        return next(hardware_map_iter, None)
+        lock_timeout_duration: float = 600.0  # [s]
+        lock: BaseFileLock = FileLock(f"{self.hardware_map_file}.lock")
+
+        while True:
+            wait_for_platform_flag = False
+            with lock.acquire(lock_timeout_duration):
+                with open(self.hardware_map_file, 'r', encoding='UTF-8') as file:
+                    data = yaml.safe_load(file)
+                hardware_map_list = [HardwareMap(**hardware) for hardware in data]
+
+                for hardware in hardware_map_list:
+                    if hardware.platform == platform and hardware.connected:
+                        if hardware.available:
+                            hardware.available = False
+                            with open(self.hardware_map_file, 'w', encoding='UTF-8') as file:
+                                hardware_map_list_as_dict = [hardware.asdict() for hardware in hardware_map_list]
+                                yaml.dump(hardware_map_list_as_dict, file, Dumper=yaml.Dumper, default_flow_style=False)
+                            return hardware
+                        else:
+                            wait_for_platform_flag = True
+            if wait_for_platform_flag:
+                logger.debug("Waiting for platform %s availability", platform)
+                time.sleep(1)
+            else:
+                return None
+
+    def free_hardware(self, used_hardware: HardwareMap | None) -> None:
+        """
+        Add mechanism at the beginning of tests to set all devices "available" option to True, to avoid situation when 
+        some previous test running leave available option set on False and do not change it to True (in case of
+        test running interruption).
+        """
+        if used_hardware is None:
+            return
+
+        lock_timeout_duration: float = 600.0  # [s]
+        lock: BaseFileLock = FileLock(f"{self.hardware_map_file}.lock")
+
+        with lock.acquire(lock_timeout_duration):
+            with open(self.hardware_map_file, 'r', encoding='UTF-8') as file:
+                data = yaml.safe_load(file)
+            hardware_map_list = [HardwareMap(**hardware) for hardware in data]
+
+            for hardware in hardware_map_list:
+                if hardware.platform == used_hardware.platform \
+                        and hardware.id == used_hardware.id \
+                        and hardware.product == used_hardware.product:
+                    if not hardware.available:
+                        hardware.available = True
+                        with open(self.hardware_map_file, 'w', encoding='UTF-8') as file:
+                            hardware_map_list_as_dict = [hardware.asdict() for hardware in hardware_map_list]
+                            yaml.dump(hardware_map_list_as_dict, file, Dumper=yaml.Dumper, default_flow_style=False)
+                        break
 
     def get_platform(self, name: str) -> PlatformSpecification:
         for platform in self.platforms:
