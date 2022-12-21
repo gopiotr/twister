@@ -32,7 +32,7 @@ class WestBuilder(BuilderAbstract):
             command.extend(['--build-dir', str(build_config.build_dir)])
         if cmake_args := build_config.extra_args:
             args = self._prepare_cmake_args(cmake_args)
-            command.extend(['--', args])
+            command.extend(['--'] + args)
 
         logger.info('Building Zephyr application')
         log_command(logger, 'Build command', command, level=logging.INFO)
@@ -64,8 +64,9 @@ class WestBuilder(BuilderAbstract):
             logger.log(level, line)
 
     @staticmethod
-    def _prepare_cmake_args(cmake_args: list[str]) -> str:
-        args_joined = ' '.join([f'-D{arg}' for arg in cmake_args])
-        if ' ' in args_joined:
-            return f'"{args_joined}"'
-        return f'{args_joined}'
+    def _prepare_cmake_args(cmake_args: list[str]) -> list:
+        return [f'-D{arg}' for arg in cmake_args]
+        # args_joined = ' '.join([f'-D{arg}' for arg in cmake_args])
+        # if ' ' in args_joined:
+        #     return f'"{args_joined}"'
+        # return f'{args_joined}'

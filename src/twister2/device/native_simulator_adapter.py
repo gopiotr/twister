@@ -28,7 +28,7 @@ END_DATA = object()
 class NativeSimulatorAdapter(DeviceAbstract):
     """Adapter class for a device simulator."""
 
-    def __init__(self, twister_config: TwisterConfig, **kwargs) -> None:
+    def __init__(self, twister_config: TwisterConfig, command=None, **kwargs) -> None:
         super().__init__(twister_config, **kwargs)
         self._process: asyncio.subprocess.Process | None = None
         self._process_ended_with_timeout: bool = False
@@ -36,16 +36,20 @@ class NativeSimulatorAdapter(DeviceAbstract):
         self._stop_job: bool = False
         self._exc: Exception | None = None  #: store any exception which appeared running this thread
         self._thread: threading.Thread | None = None
+        self.command = command
 
-    @staticmethod
-    def _get_command(build_dir: Path | str) -> list[str]:
+    # @staticmethod
+    def _get_command(self, build_dir: Path | str) -> list[str]:
         """
         Return command to run.
 
         :param build_dir: build directory
         :return: command to run
         """
-        return [str((Path(build_dir) / 'zephyr' / 'zephyr.exe').resolve())]
+        if self.command is None:
+            return [str((Path(build_dir) / 'zephyr' / 'zephyr.exe').resolve())]
+        else:
+            return self.command
 
     def connect(self, timeout: float = 1) -> None:
         pass
@@ -64,11 +68,13 @@ class NativeSimulatorAdapter(DeviceAbstract):
         assert isinstance(command, (list, tuple, set))  # to avoid stupid and difficult to debug mistakes
         # we are using asyncio to run subprocess to be able to read from stdout
         # without blocking while loop (readline with timeout)
+        cwd = str(Path(command[0]).parent)
         self._process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env=self.env
+            env=self.env,
+            cwd=cwd
         )
         logger.debug('Started subprocess with PID %s', self._process.pid)
         end_time = time.time() + timeout
