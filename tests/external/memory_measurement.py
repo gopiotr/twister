@@ -7,30 +7,35 @@ import matplotlib.pyplot as plt
 import os
 import psutil
 import shlex
+import signal
 import subprocess
 import sys
 import time
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-ch = logging.StreamHandler()
-logger.addHandler(ch)
+logger_handler = logging.StreamHandler()
+formatter = logging.Formatter("%(levelname)s: %(message)s")
+logger_handler.setFormatter(formatter)
+logger.addHandler(logger_handler)
+
 
 CURRENT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR_NAME: Path = CURRENT_DIR / "measurements"
 TIMESTAMP_FORMAT: str = "%H:%M:%S.%f"
-TIMESTAMP_INFO_FILE_BASE_NAME: str = "timestamp_info.csv"
+TIMESTAMP_INFO_FILE_BASE_NAME: str = "_timestamp_info.csv"
 
 
 class ExperimentInfo(NamedTuple):
     name: str
     command: str
     cwd: str
+    timeout: float | None = None  # [s]
 
 
 class ProcessInfo(NamedTuple):
@@ -48,9 +53,11 @@ class TimestampInfo:
         return sum(self.pid_rss_mbytes.values())
 
 
-def run_experiment(experiment_name: str, command: list[str], cwd: str, out_dir: Path) -> None:
+def run_experiment(
+        out_dir: Path, experiment_name: str, command: list[str], cwd: str, timeout: float | None = None
+) -> None:
     main_process: subprocess.Popen = _run_process(command, cwd)
-    measurements, processes_info = _collect_data(main_process)
+    measurements, processes_info = _collect_data(main_process, timeout)
     _save_measurements(out_dir, measurements, processes_info, experiment_name)
 
 
@@ -58,12 +65,15 @@ def _run_process(command: list[str], cwd: str) -> subprocess.Popen:
     logger.info("Run command: %s", shlex.join(command))
     env = os.environ.copy()
     process = subprocess.Popen(command, env=env, text=True, cwd=cwd,
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               preexec_fn=os.setsid
+                               )
     return process
 
 
-def _collect_data(main_process: subprocess.Popen) -> tuple[list[TimestampInfo], dict[int, ProcessInfo]]:
+def _collect_data(
+        main_process: subprocess.Popen, timeout_duration: float | None = None
+) -> tuple[list[TimestampInfo], dict[int, ProcessInfo]]:
     measurements: list[TimestampInfo] = []
     processes_info: dict[int, ProcessInfo] = {}  # key is a process PID
 
@@ -74,6 +84,8 @@ def _collect_data(main_process: subprocess.Popen) -> tuple[list[TimestampInfo], 
     main_ps_info = ProcessInfo(main_ps_pid, main_ps_tracker.name(), main_ps_tracker.cmdline())
     processes_info[main_ps_pid] = main_ps_info
 
+    if timeout_duration is not None:
+        timeout = datetime.now() + timedelta(0, seconds=timeout_duration)
     while main_process.poll() is None:
         timestamp: str = datetime.now().strftime(TIMESTAMP_FORMAT)
         measurement = TimestampInfo(timestamp)
@@ -97,18 +109,24 @@ def _collect_data(main_process: subprocess.Popen) -> tuple[list[TimestampInfo], 
                 pass
 
         measurements.append(measurement)
+
+        if timeout_duration is not None:
+            if datetime.now() > timeout:
+                break
+
         time.sleep(0.1)
 
-    # just to be sure that main process was finished:
-    main_process.wait()
-
-    msg = f"Main process finished with return code: {main_process.returncode}"
-    if main_process.returncode == 0:
-        logger.info(msg)
+    if main_process.poll() is None:
+        os.killpg(os.getpgid(main_process.pid), signal.SIGTERM)
+        logger.warning("Main process terminated after %.1fs timeout", timeout_duration)
     else:
-        logger.error(msg)
-        for line in main_process.stdout.readlines():
-            logger.debug(line)
+        msg = f"Main process finished with return code: {main_process.returncode}"
+        if main_process.returncode == 0:
+            logger.info(msg)
+        else:
+            logger.warning(msg)
+            # for line in main_process.stdout.readlines():
+            #     logger.debug(line)
 
     return measurements, processes_info
 
@@ -126,20 +144,21 @@ def _save_measurements(
         processes_info: dict[int, ProcessInfo],
         experiment_name: str
 ) -> None:
-    out_dir = out_dir / experiment_name
-    os.makedirs(out_dir, exist_ok=True)
-    _save_to_files(measurements, processes_info, out_dir)
+    experiment_out_dir = out_dir / experiment_name
+    os.makedirs(experiment_out_dir, exist_ok=True)
+    _save_to_files(measurements, processes_info, out_dir, experiment_name)
     _draw_plot(measurements, out_dir, experiment_name)
 
 
 def _save_to_files(
         measurements: list[TimestampInfo],
         processes_info: dict[int, ProcessInfo],
-        out_dir: Path
+        out_dir: Path,
+        experiment_name: str
 ) -> None:
     logger.info("Save measurements to files")
 
-    with open(out_dir / "processes_info.txt", "w") as file:
+    with open(out_dir / experiment_name / "processes_info.txt", "w") as file:
         for process_info in processes_info.values():
             file.write(f"{process_info.pid}\n{process_info.name}\n{process_info.cmdline}\n")
             for measurement in measurements:
@@ -147,7 +166,7 @@ def _save_to_files(
                     file.write(f"{measurement.timestamp}: {str(measurement.pid_rss_mbytes[process_info.pid])}\n")
             file.write("\n")
 
-    with open(out_dir / "timestamp_info_full.txt", "w") as file:
+    with open(out_dir / experiment_name / "timestamp_info_full.txt", "w") as file:
         for measurement in measurements:
             file.write(f"{measurement.timestamp}, {measurement.get_rss_mbytes_sum()}\n")
             for pid, rss_mbytes in measurement.pid_rss_mbytes.items():
@@ -155,7 +174,7 @@ def _save_to_files(
                 file.write(f"{process_info.pid} {rss_mbytes} {process_info.name} {process_info.cmdline}\n")
             file.write("\n")
 
-    with open(out_dir / TIMESTAMP_INFO_FILE_BASE_NAME, "w") as file:
+    with open(out_dir / f"{experiment_name}{TIMESTAMP_INFO_FILE_BASE_NAME}", "w") as file:
         writer = csv.writer(file)
         header = ["timestamp", "rss_mbytes"]
         writer.writerow(header)
@@ -179,7 +198,7 @@ def _draw_plot(
     plt.xlabel("time [s]")
     plt.ylabel("RSS [Mbytes]")
     plt.grid()
-    plt.savefig(out_dir / "measurement.png")
+    plt.savefig(out_dir / experiment_name / "measurement.png")
     # plt.show()
     plt.clf()
 
@@ -196,18 +215,17 @@ def draw_comparison_plot(out_dir: Path) -> None:
     logger.info("Prepare comparison")
 
     plt.clf()
-    experiment_dirs = [dir for dir in out_dir.iterdir() if dir.is_dir()]
-    for experiment_dir in experiment_dirs:
-        experiment_name = experiment_dir.name
-        file_name = experiment_dir / TIMESTAMP_INFO_FILE_BASE_NAME
+    timestamp_info_files = [f for f in out_dir.iterdir() if f.is_file() and f.name.endswith(TIMESTAMP_INFO_FILE_BASE_NAME)]
+    for timestamp_info_file in timestamp_info_files:
         timestamps = []
         rss_mbytes = []
-        with open(file_name) as file:
+        with open(timestamp_info_file) as file:
             reader = csv.DictReader(file)
             for line in reader:
                 timestamps.append(line["timestamp"])
                 rss_mbytes.append(float(line["rss_mbytes"]))
         timestamps = _normalize_timestamps(timestamps)
+        experiment_name = timestamp_info_file.name[:-len(TIMESTAMP_INFO_FILE_BASE_NAME)]
         plt.plot(timestamps, rss_mbytes, label=experiment_name)
 
     plt.title("comparison")
@@ -248,34 +266,54 @@ def main():
 
     zephyr_base_path = get_zephyr_base_path()
 
-    # v1_basic_command = ["./scripts/twister", "-vv"]
-    # v2_basic_command = ["pytest", "-vvs", "--log-level=INFO", "-o", "log_cli=true"]
-    v1_basic_command = ["./scripts/twister"]
-    v2_basic_command = ["pytest"]
+    # v2_basic_command = ["pytest", "--outdir=twister-out_v2", "--clear=delete", "-vvs", "--log-level=INFO", "-o", "log_cli=true"]
+    # v1_basic_command = ["./scripts/twister", "--outdir", "twister-out_v1", "--clobber-output", "-vv"]
+    v2_basic_command = ["pytest", "--outdir=twister-out_v2", "--clear=delete"]
+    v1_basic_command = ["./scripts/twister", "--outdir", "twister-out_v1", "--clobber-output"]
+
+    experiment_number = ""
+    # experiment_number = "00_"
 
     experiments = [
         # # collect only
-        # ExperimentInfo("v1_np_ker_com_co_j4", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel/common", "--dry-run"], zephyr_base_path),
-        # ExperimentInfo("v2_np_ker_com_co_n4", v2_basic_command + ["--platform=native_posix", "tests/kernel/common", "-n", "4", "--collect-only"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v2_np_ker_com_co_nauto", v2_basic_command + ["--platform=native_posix", "tests/kernel/common", "-n", "auto", "--collect-only"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v1_np_ker_com_co", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel/common", "--dry-run"], zephyr_base_path),
 
         # # build only
-        # ExperimentInfo("v1_np_ker_com_bo_j4", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel/common", "--build-only"], zephyr_base_path),
-        # ExperimentInfo("v2_np_ker_com_bo_n4", v2_basic_command + ["--platform=native_posix", "tests/kernel/common", "-n", "4", "--build-only"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v2_np_ker_com_bo_nauto", v2_basic_command + ["--platform=native_posix", "tests/kernel/common", "-n", "auto", "--build-only"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v1_np_ker_com_bo", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel/common", "--build-only"], zephyr_base_path),
 
         # execute test
-        ExperimentInfo("v1_np_ker_com", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel/common"], zephyr_base_path),
-        ExperimentInfo("v2_np_ker_com_n_auto", v2_basic_command + ["--platform=native_posix", "tests/kernel/common", "-n", "auto"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v2_np_ker_com_nauto", v2_basic_command + ["--platform=native_posix", "tests/kernel/common", "-n", "auto"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v1_np_ker_com", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel/common"], zephyr_base_path),
+
+        # # kernel build only
+        # ExperimentInfo(f"{experiment_number}v2_np_ker_bo_nauto", v2_basic_command + ["--platform=native_posix", "tests/kernel", "-n", "auto", "--build-only"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v1_np_ker_bo", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only"], zephyr_base_path),
+
+        # all tests build only
+        ExperimentInfo(f"{experiment_number}v2_all_tests_bo_nauto", v2_basic_command + ["--all", "tests", "--build-only", "-n", "auto"], zephyr_base_path, 120.0),
+        ExperimentInfo(f"{experiment_number}v1_all_tests_bo", v1_basic_command + ["--all", "-T", "tests", "--build-only"], zephyr_base_path, 120.0),
+
+        # # kernel build only v1
+        # ExperimentInfo(f"{experiment_number}v1_np_ker_bo_j1", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only", "-j", "1"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v1_np_ker_bo_j2", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only", "-j", "2"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v1_np_ker_bo_j3", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only", "-j", "3"], zephyr_base_path),
+        # ExperimentInfo(f"{experiment_number}v1_np_ker_bo_j4", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only", "-j", "4"], zephyr_base_path),
+
     ]
 
     # out_dir = CURRENT_DIR / "collect_only"
     # out_dir = CURRENT_DIR / "build_only"
     # out_dir = CURRENT_DIR / "execute"
+    # out_dir = CURRENT_DIR / "all_tests_bo"
+    # out_dir = CURRENT_DIR / "kernel_bo_v1_j"
 
     os.makedirs(out_dir, exist_ok=True)
 
     if not compare_only:
         for experiment in experiments:
-            run_experiment(*experiment, out_dir)
+            run_experiment(out_dir, *experiment)
 
     draw_comparison_plot(out_dir)
 
