@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import os
 import psutil
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -28,6 +29,7 @@ logger.addHandler(logger_handler)
 CURRENT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR_NAME: Path = CURRENT_DIR / "measurements"
 TIMESTAMP_FORMAT: str = "%H:%M:%S.%f"
+SAMPLING_RATE: float = 0.2  # [s]
 TIMESTAMP_INFO_FILE_BASE_NAME: str = "_timestamp_info.csv"
 
 
@@ -47,10 +49,10 @@ class ProcessInfo(NamedTuple):
 class TimestampInfo:
     def __init__(self, timestamp: str) -> None:
         self.timestamp: str = timestamp
-        self.pid_rss_mbytes: dict[int, float] = {}
+        self.pid_memory_mbytes: dict[int, float] = {}
 
-    def get_rss_mbytes_sum(self) -> float:
-        return sum(self.pid_rss_mbytes.values())
+    def get_memory_mbytes_sum(self) -> float:
+        return sum(self.pid_memory_mbytes.values())
 
 
 def run_experiment(
@@ -91,10 +93,7 @@ def _collect_data(
         measurement = TimestampInfo(timestamp)
 
         # analyze main process
-        try:
-            measurement.pid_rss_mbytes[main_ps_pid] = _to_mb(main_ps_tracker.memory_info().rss)
-        except psutil.NoSuchProcess:
-            pass
+        measurement.pid_memory_mbytes[main_ps_pid] = _get_used_memory(main_ps_tracker)
 
         # analyze child processes
         for child_ps_tracker in main_ps_tracker.children(recursive=True):
@@ -103,10 +102,10 @@ def _collect_data(
                 if child_ps_pid not in processes_info:
                     child_ps_info = ProcessInfo(child_ps_pid, child_ps_tracker.name(), child_ps_tracker.cmdline())
                     processes_info[child_ps_pid] = child_ps_info
-
-                measurement.pid_rss_mbytes[child_ps_pid] = _to_mb(child_ps_tracker.memory_info().rss)
             except psutil.NoSuchProcess:
-                pass
+                continue
+
+            measurement.pid_memory_mbytes[child_ps_pid] = _get_used_memory(child_ps_tracker)
 
         measurements.append(measurement)
 
@@ -114,7 +113,7 @@ def _collect_data(
             if datetime.now() > timeout:
                 break
 
-        time.sleep(0.1)
+        time.sleep(SAMPLING_RATE)
 
     if main_process.poll() is None:
         os.killpg(os.getpgid(main_process.pid), signal.SIGTERM)
@@ -129,6 +128,33 @@ def _collect_data(
             #     logger.debug(line)
 
     return measurements, processes_info
+
+
+def _get_used_memory(ps_tracker: psutil.Process) -> float:
+    """
+    RSS - Resident Set Size shows how much RAM is utilized at the time the
+    command is output. It also should be noted that it shows the entire stack
+    of physically allocated memory.
+    https://en.wikipedia.org/wiki/Resident_set_size
+
+    PSS - Proportional Set Size is the portion of main memory (RAM) occupied by
+    a process and is composed by the private memory of that process plus the
+    proportion of shared memory with one or more other processes. One advantage
+    of PSS is that summing all the processes together, we get a good
+    approximation of the whole memory usage in a system.
+    https://en.wikipedia.org/wiki/Proportional_set_size
+    https://www.baeldung.com/linux/process-memory-management#pss-memory
+    """
+
+    try:
+        # used_memory = ps_tracker.memory_info().rss
+        used_memory = ps_tracker.memory_full_info().pss
+    except psutil.NoSuchProcess:
+        used_memory = 0
+
+    used_memory = _to_mb(used_memory)
+
+    return used_memory
 
 
 def _to_mb(bytes: int) -> float:
@@ -158,28 +184,28 @@ def _save_to_files(
 ) -> None:
     logger.info("Save measurements to files")
 
+    with open(out_dir / f"{experiment_name}{TIMESTAMP_INFO_FILE_BASE_NAME}", "w") as file:
+        writer = csv.writer(file)
+        header = ["timestamp", "memory_mbytes"]
+        writer.writerow(header)
+        for measurement in measurements:
+            writer.writerow([measurement.timestamp, measurement.get_memory_mbytes_sum()])
+
     with open(out_dir / experiment_name / "processes_info.txt", "w") as file:
         for process_info in processes_info.values():
             file.write(f"{process_info.pid}\n{process_info.name}\n{process_info.cmdline}\n")
             for measurement in measurements:
-                if process_info.pid in measurement.pid_rss_mbytes:
-                    file.write(f"{measurement.timestamp}: {str(measurement.pid_rss_mbytes[process_info.pid])}\n")
+                if process_info.pid in measurement.pid_memory_mbytes:
+                    file.write(f"{measurement.timestamp}: {str(measurement.pid_memory_mbytes[process_info.pid])}\n")
             file.write("\n")
 
     with open(out_dir / experiment_name / "timestamp_info_full.txt", "w") as file:
         for measurement in measurements:
-            file.write(f"{measurement.timestamp}, {measurement.get_rss_mbytes_sum()}\n")
-            for pid, rss_mbytes in measurement.pid_rss_mbytes.items():
+            file.write(f"{measurement.timestamp}, {measurement.get_memory_mbytes_sum()}\n")
+            for pid, memory_mbytes in measurement.pid_memory_mbytes.items():
                 process_info = processes_info[pid]
-                file.write(f"{process_info.pid} {rss_mbytes} {process_info.name} {process_info.cmdline}\n")
+                file.write(f"{process_info.pid} {memory_mbytes} {process_info.name} {process_info.cmdline}\n")
             file.write("\n")
-
-    with open(out_dir / f"{experiment_name}{TIMESTAMP_INFO_FILE_BASE_NAME}", "w") as file:
-        writer = csv.writer(file)
-        header = ["timestamp", "rss_mbytes"]
-        writer.writerow(header)
-        for measurement in measurements:
-            writer.writerow([measurement.timestamp, measurement.get_rss_mbytes_sum()])
 
 
 def _draw_plot(
@@ -191,12 +217,12 @@ def _draw_plot(
 
     timestamps = [measurement.timestamp for measurement in measurements]
     timestamps = _normalize_timestamps(timestamps)
-    rss_mbytes = [measurement.get_rss_mbytes_sum() for measurement in measurements]
+    memory_mbytes = [measurement.get_memory_mbytes_sum() for measurement in measurements]
     plt.clf()
-    plt.plot(timestamps, rss_mbytes)
+    plt.plot(timestamps, memory_mbytes)
     plt.title(f"{experiment_name}")
     plt.xlabel("time [s]")
-    plt.ylabel("RSS [Mbytes]")
+    plt.ylabel("memory [Mbytes]")
     plt.grid()
     plt.savefig(out_dir / experiment_name / "measurement.png")
     # plt.show()
@@ -216,26 +242,38 @@ def draw_comparison_plot(out_dir: Path) -> None:
 
     plt.clf()
     timestamp_info_files = [f for f in out_dir.iterdir() if f.is_file() and f.name.endswith(TIMESTAMP_INFO_FILE_BASE_NAME)]
+    timestamp_info_files = sorted(timestamp_info_files)
     for timestamp_info_file in timestamp_info_files:
         timestamps = []
-        rss_mbytes = []
+        memory_mbytes = []
         with open(timestamp_info_file) as file:
             reader = csv.DictReader(file)
             for line in reader:
                 timestamps.append(line["timestamp"])
-                rss_mbytes.append(float(line["rss_mbytes"]))
+                memory_mbytes.append(float(line["memory_mbytes"]))
         timestamps = _normalize_timestamps(timestamps)
         experiment_name = timestamp_info_file.name[:-len(TIMESTAMP_INFO_FILE_BASE_NAME)]
-        plt.plot(timestamps, rss_mbytes, label=experiment_name)
+        plt.plot(timestamps, memory_mbytes, label=experiment_name)
 
     plt.title("comparison")
     plt.xlabel("time [s]")
-    plt.ylabel("RSS [Mbytes]")
+    plt.ylabel("memory [Mbytes]")
     plt.legend()
     plt.grid()
     plt.savefig(out_dir / "comparison.png")
     plt.show()
     plt.clf()
+
+
+def _remove_twister_out(zephyr_base_path: str, v2_out_dir: str, v1_out_dir: str):
+    logger.info("Remove twister-out dirs")
+
+    v2_out_dir_path = Path(zephyr_base_path) / v2_out_dir
+    if v2_out_dir_path.exists():
+        shutil.rmtree(v2_out_dir_path)
+    v1_out_dir_path = Path(zephyr_base_path) / v1_out_dir
+    if v1_out_dir_path.exists():
+        shutil.rmtree(v1_out_dir_path)
 
 
 def get_zephyr_base_path() -> str:
@@ -266,13 +304,20 @@ def main():
 
     zephyr_base_path = get_zephyr_base_path()
 
-    # v2_basic_command = ["pytest", "--outdir=twister-out_v2", "--clear=delete", "-vvs", "--log-level=INFO", "-o", "log_cli=true"]
-    # v1_basic_command = ["./scripts/twister", "--outdir", "twister-out_v1", "--clobber-output", "-vv"]
-    v2_basic_command = ["pytest", "--outdir=twister-out_v2", "--clear=delete"]
-    v1_basic_command = ["./scripts/twister", "--outdir", "twister-out_v1", "--clobber-output"]
+    v2_out_dir = "twister-out_v2"
+    v1_out_dir = "twister-out_v1"
+
+    # v2_basic_command = ["pytest", f"--outdir={v2_out_dir}", "--clear=delete", "-vvs", "--log-level=INFO", "-o", "log_cli=true"]
+    # v1_basic_command = ["./scripts/twister", "--outdir", v1_out_dir, "--clobber-output", "-vv"]
+    v2_basic_command = ["pytest", f"--outdir={v2_out_dir}", "--clear=delete"]
+    v1_basic_command = ["./scripts/twister", "--outdir", v1_out_dir, "--clobber-output"]
+    # v2_basic_command = ["pytest", f"--outdir={v2_out_dir}"]
+    # v1_basic_command = ["./scripts/twister", "--outdir", v1_out_dir]
 
     experiment_number = ""
     # experiment_number = "00_"
+
+    cwd_dummy = "/home/redbeard/Nordic/miscellaneous/21_memory_measurement"
 
     experiments = [
         # # collect only
@@ -283,7 +328,7 @@ def main():
         # ExperimentInfo(f"{experiment_number}v2_np_ker_com_bo_nauto", v2_basic_command + ["--platform=native_posix", "tests/kernel/common", "-n", "auto", "--build-only"], zephyr_base_path),
         # ExperimentInfo(f"{experiment_number}v1_np_ker_com_bo", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel/common", "--build-only"], zephyr_base_path),
 
-        # execute test
+        # # execute test
         # ExperimentInfo(f"{experiment_number}v2_np_ker_com_nauto", v2_basic_command + ["--platform=native_posix", "tests/kernel/common", "-n", "auto"], zephyr_base_path),
         # ExperimentInfo(f"{experiment_number}v1_np_ker_com", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel/common"], zephyr_base_path),
 
@@ -292,27 +337,45 @@ def main():
         # ExperimentInfo(f"{experiment_number}v1_np_ker_bo", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only"], zephyr_base_path),
 
         # all tests build only
-        ExperimentInfo(f"{experiment_number}v2_all_tests_bo_nauto", v2_basic_command + ["--all", "tests", "--build-only", "-n", "auto"], zephyr_base_path, 120.0),
-        ExperimentInfo(f"{experiment_number}v1_all_tests_bo", v1_basic_command + ["--all", "-T", "tests", "--build-only"], zephyr_base_path, 120.0),
+        ExperimentInfo(f"{experiment_number}v2_all_tests_bo_nauto", v2_basic_command + ["--all", "tests", "--build-only", "-n", "auto"], zephyr_base_path, 450.0),
+        ExperimentInfo(f"{experiment_number}v1_all_tests_bo", v1_basic_command + ["--all", "-T", "tests", "--build-only"], zephyr_base_path, 350.0),
 
-        # # kernel build only v1
-        # ExperimentInfo(f"{experiment_number}v1_np_ker_bo_j1", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only", "-j", "1"], zephyr_base_path),
-        # ExperimentInfo(f"{experiment_number}v1_np_ker_bo_j2", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only", "-j", "2"], zephyr_base_path),
-        # ExperimentInfo(f"{experiment_number}v1_np_ker_bo_j3", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only", "-j", "3"], zephyr_base_path),
-        # ExperimentInfo(f"{experiment_number}v1_np_ker_bo_j4", v1_basic_command + ["-p", "native_posix", "-T", "tests/kernel", "--build-only", "-j", "4"], zephyr_base_path),
+        # # all build only v1 j
+        # ExperimentInfo(f"{experiment_number}v1_all_tests_bo_j4", v1_basic_command + ["--all", "-T", "tests", "--build-only", "-j", "4"], zephyr_base_path, 250.0),
+        # ExperimentInfo(f"{experiment_number}v1_all_tests_bo_j3", v1_basic_command + ["--all", "-T", "tests", "--build-only", "-j", "3"], zephyr_base_path, 250.0),
+        # ExperimentInfo(f"{experiment_number}v1_all_tests_bo_j2", v1_basic_command + ["--all", "-T", "tests", "--build-only", "-j", "2"], zephyr_base_path, 250.0),
+        # ExperimentInfo(f"{experiment_number}v1_all_tests_bo_j1", v1_basic_command + ["--all", "-T", "tests", "--build-only", "-j", "1"], zephyr_base_path, 250.0),
 
+        # # all build only v2 n
+        # ExperimentInfo(f"{experiment_number}v2_all_tests_bo_n4", v2_basic_command + ["--all", "tests", "--build-only", "-n", "4"], zephyr_base_path, 350.0),
+        # ExperimentInfo(f"{experiment_number}v2_all_tests_bo_n3", v2_basic_command + ["--all", "tests", "--build-only", "-n", "3"], zephyr_base_path, 350.0),
+        # ExperimentInfo(f"{experiment_number}v2_all_tests_bo_n2", v2_basic_command + ["--all", "tests", "--build-only", "-n", "2"], zephyr_base_path, 300.0),
+        # ExperimentInfo(f"{experiment_number}v2_all_tests_bo_n1", v2_basic_command + ["--all", "tests", "--build-only", "-n", "1"], zephyr_base_path, 250.0),
+        # ExperimentInfo(f"{experiment_number}v2_all_tests_bo", v2_basic_command + ["--all", "tests", "--build-only"], zephyr_base_path, 250.0),
+
+        # # dummy n
+        # ExperimentInfo(f"{experiment_number}dummy_n4", ["pytest", "test_dummy.py", "-n", "4"], cwd_dummy, 600.0),
+        # ExperimentInfo(f"{experiment_number}dummy_n3", ["pytest", "test_dummy.py", "-n", "3"], cwd_dummy, 600.0),
+        # ExperimentInfo(f"{experiment_number}dummy_n2", ["pytest", "test_dummy.py", "-n", "2"], cwd_dummy, 600.0),
+        # ExperimentInfo(f"{experiment_number}dummy_n1", ["pytest", "test_dummy.py", "-n", "1"], cwd_dummy, 600.0),
+        # ExperimentInfo(f"{experiment_number}dummy", ["pytest", "test_dummy.py"], cwd_dummy, 600.0),
     ]
 
-    # out_dir = CURRENT_DIR / "collect_only"
-    # out_dir = CURRENT_DIR / "build_only"
-    # out_dir = CURRENT_DIR / "execute"
+    # out_dir = CURRENT_DIR / "np_ker_com_co"
+    # out_dir = CURRENT_DIR / "np_ker_com_bo"
+    # out_dir = CURRENT_DIR / "np_ker_com"
+    # out_dir = CURRENT_DIR / "np_ker_bo"
     # out_dir = CURRENT_DIR / "all_tests_bo"
     # out_dir = CURRENT_DIR / "kernel_bo_v1_j"
+    # out_dir = CURRENT_DIR / "kernel_bo_v2_n"
+    # out_dir = CURRENT_DIR / "dummy_n_pytest_basic"
+    # out_dir = CURRENT_DIR / "dummy_n_twisterv2"
 
     os.makedirs(out_dir, exist_ok=True)
 
     if not compare_only:
         for experiment in experiments:
+            _remove_twister_out(zephyr_base_path, v2_out_dir, v1_out_dir)
             run_experiment(out_dir, *experiment)
 
     draw_comparison_plot(out_dir)
