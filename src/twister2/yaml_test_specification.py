@@ -57,6 +57,8 @@ class YamlTestSpecification:
     modules: list[str] = field(default_factory=list)
     testcases: list[str] = field(default_factory=list)
     sysbuild: bool = False
+    extra_conf_files: list[str] = field(default_factory=list)
+    extra_dtc_overlay_files: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         self.tags = string_to_set(self.tags)
@@ -135,6 +137,8 @@ class TestSchema(Schema):
     slow = fields.Bool()
     sysbuild = fields.Bool()
     source_dir = fields.Str()
+    extra_conf_files = fields.List(fields.Str())
+    extra_dtc_overlay_files = fields.List(fields.Str())
 
 
 class CommonSchema(TestSchema):
