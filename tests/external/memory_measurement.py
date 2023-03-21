@@ -354,11 +354,11 @@ def main():
         # ExperimentInfo(f"{experiment_number}v2_all_tests_bo", v2_basic_command + ["--all", "tests", "--build-only"], zephyr_base_path, 250.0),
 
         # # dummy n
-        # ExperimentInfo(f"{experiment_number}dummy_n4", ["pytest", "test_dummy.py", "-n", "4"], cwd_dummy, 600.0),
-        # ExperimentInfo(f"{experiment_number}dummy_n3", ["pytest", "test_dummy.py", "-n", "3"], cwd_dummy, 600.0),
-        # ExperimentInfo(f"{experiment_number}dummy_n2", ["pytest", "test_dummy.py", "-n", "2"], cwd_dummy, 600.0),
-        # ExperimentInfo(f"{experiment_number}dummy_n1", ["pytest", "test_dummy.py", "-n", "1"], cwd_dummy, 600.0),
-        # ExperimentInfo(f"{experiment_number}dummy", ["pytest", "test_dummy.py"], cwd_dummy, 600.0),
+        # ExperimentInfo(f"{experiment_number}dummy_n4", ["pytest", "test_dummy.py", "-n", "4"], cwd_dummy),
+        # ExperimentInfo(f"{experiment_number}dummy_n3", ["pytest", "test_dummy.py", "-n", "3"], cwd_dummy),
+        # ExperimentInfo(f"{experiment_number}dummy_n2", ["pytest", "test_dummy.py", "-n", "2"], cwd_dummy),
+        # ExperimentInfo(f"{experiment_number}dummy_n1", ["pytest", "test_dummy.py", "-n", "1"], cwd_dummy),
+        # ExperimentInfo(f"{experiment_number}dummy", ["pytest", "test_dummy.py"], cwd_dummy),
     ]
 
     # out_dir = CURRENT_DIR / "np_ker_com_co"
@@ -366,8 +366,8 @@ def main():
     # out_dir = CURRENT_DIR / "np_ker_com"
     # out_dir = CURRENT_DIR / "np_ker_bo"
     # out_dir = CURRENT_DIR / "all_tests_bo"
-    # out_dir = CURRENT_DIR / "kernel_bo_v1_j"
-    # out_dir = CURRENT_DIR / "kernel_bo_v2_n"
+    # out_dir = CURRENT_DIR / "all_tests_bo_v1_j"
+    # out_dir = CURRENT_DIR / "all_tests_bo_v2_n"
     # out_dir = CURRENT_DIR / "dummy_n_pytest_basic"
     # out_dir = CURRENT_DIR / "dummy_n_twisterv2"
 
